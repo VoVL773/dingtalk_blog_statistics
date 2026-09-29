@@ -21,7 +21,7 @@
     https://...
     09-22 《标题B》
     https://...
-    2) 邓** 1 篇
+    2) 邓**1 篇
     ...
     未完成（5 人）：张三、李四
     无法判断（1 人）：王五（博客打不开（超时））
@@ -609,6 +609,27 @@ def scan_html(html):
     return scanner
 
 
+def same_site_post_url(url, base_url):
+    """
+    站点挂在子路径下时（GitHub Pages 项目站），页面里有时会写成根相对链接，
+    例如博客在 /astro-navfolio/ 却写 href="/blog/xxx/"（实测 404）。
+    这里把这些链接补回站点前缀，例如 /blog/xxx -> /astro-navfolio/blog/xxx。
+    """
+    base = urlparse(base_url)
+    parts = urlparse(url)
+    if parts.netloc != base.netloc:
+        return url
+    base_path = base.path.strip('/')
+    if not base_path or parts.path.strip('/').startswith(base_path):
+        return url
+    fixed = urljoin(base_url, parts.path.lstrip('/'))
+    if parts.query:
+        fixed += '?' + parts.query
+    if parts.fragment:
+        fixed += '#' + parts.fragment
+    return fixed
+
+
 def page_signals(html, base_url):
     """返回 (页面上的日期列表, [(链接, 日期, 标题)])"""
     scanner = scan_html(html)
@@ -622,11 +643,19 @@ def page_signals(html, base_url):
         when = parse_date(text) or parse_date(url)
         if when:
             title = re.sub(r'20\d{2}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?', '', text).strip()
-            candidates.append({'url': url, 'date': when, 'title': title or None})
+            candidates.append({'url': same_site_post_url(url, base_url), 'date': when, 'title': title or None})
 
     # 链接文字里没有日期、但旁边有 <time datetime> 的（Astro / Hugo 等主题很常见）：
-    # 把每个 <time> 配给前后最近的那个文章链接
-    anchor_events = [(i, e) for i, e in enumerate(scanner.events) if e[0] == 'anchor']
+    # 把每个 <time> 配给最近的「本站的文章链接」——必须同时满足同站 + 像文章，
+    # 否则页脚/导航里的外链（比如 GitHub 链接）会在距离并列时被误配走
+    anchor_events = []
+    for anchor_index, event in enumerate(scanner.events):
+        if event[0] != 'anchor':
+            continue
+        url = same_site_post_url(urljoin(base_url, event[1]), base_url)
+        if same_site(url, base_url) and looks_like_post(url, base_url):
+            anchor_events.append((anchor_index, url, event[2]))
+
     known = {c['url'] for c in candidates}
     for index, event in enumerate(scanner.events):
         if event[0] != 'time':
@@ -635,17 +664,17 @@ def page_signals(html, base_url):
         if not when:
             continue
         best, best_gap = None, 9
-        for anchor_index, anchor_event in anchor_events:
+        for anchor_index, url, text in anchor_events:
             gap = abs(anchor_index - index)
             if gap <= 8 and gap < best_gap:
-                best, best_gap = anchor_event, gap
+                best, best_gap = (url, text), gap
         if not best:
             continue
-        url = urljoin(base_url, best[1])
-        if url in known or not looks_like_post(url, base_url):
+        url, text = best
+        if url in known:
             continue
         known.add(url)
-        candidates.append({'url': url, 'date': when, 'title': best[2] or None})
+        candidates.append({'url': url, 'date': when, 'title': text or None})
     return dates, candidates
 
 
